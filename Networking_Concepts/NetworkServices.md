@@ -1,4 +1,4 @@
-# 🛡️ TryHackMe — Network Services (Room 2)
+# 🛡️ TryHackMe — Network Services (Room 1)
 
 > **Platform:** TryHackMe
 > **Room Name:** `Network Services`
