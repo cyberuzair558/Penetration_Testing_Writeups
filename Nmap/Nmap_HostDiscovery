@@ -1,0 +1,196 @@
+# 🛰️ Nmap — Host Discovery
+
+> **TryHackMe Room:** Nmap  
+> **Focus Area:** Network Host Discovery (finding *live* hosts on a network before scanning their ports)
+
+---
+
+## 📌 Overview
+
+Before scanning ports on a target, the first step in any reconnaissance workflow is to figure out **which hosts on a network are actually alive**. Nmap offers multiple host-discovery techniques that rely on different protocols — **ARP, ICMP, TCP, and UDP** — each useful in different network conditions (local vs remote, firewall present vs absent).
+
+This writeup documents every host discovery technique and flag covered, along with the underlying networking concepts (TCP flags, CIDR, subnetting) needed to fully understand *why* each scan works the way it does.
+
+---
+
+## 🔍 The `-sS` Flag (SYN Scan Fundamentals)
+
+```bash
+sudo nmap -sS example.com
+```
+
+- Sends a **SYN packet** to the target port — this is the first step of the TCP 3-way handshake.
+- If the port is **open** → target responds with **SYN/ACK** → Nmap immediately sends an **RST** to tear down the connection before it fully completes.
+- If the port is **closed** → target responds directly with **RST**.
+- Because the full TCP handshake is never completed, this is called a **half-open scan** — it's fast and generates fewer logs on the target, making it stealthier than a full connect scan.
+- Requires **raw socket privileges** (`sudo`/root) to craft the packet manually.
+
+---
+
+## 📂 Supplying Targets: `-iL` vs `-sL`
+
+These two flags are commonly confused but do **completely different things**:
+
+| Flag | What it actually does |
+|------|------------------------|
+| **`-iL <file>`** | **Input List** — reads target IPs/hostnames from a file instead of the command line. A **full normal scan** (host discovery + port scan) still runs on every target in the file. |
+| **`-sL`** | **List Scan** — a scan *type* that sends **zero packets** to any target. It only performs reverse-DNS lookups and prints out the list of IPs that *would* be scanned. It's a dry-run/preview only. |
+
+```bash
+nmap -iL targets.txt          # Reads targets from file, scans them normally
+nmap -sL 10.10.10.0/24         # Just lists IPs in range, sends no packets
+nmap -sL -iL targets.txt       # Combine: preview targets pulled from a file
+```
+
+**In short:**
+- `-iL` = *where* the targets come from
+- `-sL` = *what* to do with them (nothing — just list)
+
+---
+
+## 🎯 `-sn` (No Port Scan / Host Discovery Only)
+
+```bash
+sudo nmap -sn 10.200.6.0/24
+```
+
+- `-sn` (formerly `-sP`) tells Nmap: **"Only check if hosts are alive — do NOT scan any ports."**
+- If `-sn` is **omitted**, Nmap will discover live hosts **and then automatically run a full port scan** on each one found.
+- This makes `-sn` extremely useful for quick network mapping / asset discovery without the noise of a full port scan.
+
+---
+
+## 🌐 IP Ranges & Subnetting Concepts
+
+### IP Ranges (Same Subnet, Multiple Hosts)
+
+```bash
+nmap 10.11.12.15-20
+```
+This scans 6 consecutive IPs within the **same local subnet**: `.15, .16, .17, .18, .19, .20` — the range only varies in the last octet, meaning all these hosts belong to the same network segment.
+
+### CIDR Notation (`/xx`) & Subnet Masks
+
+```bash
+nmap MACHINE_IP/30
+```
+
+CIDR notation represents the **subnet mask** — it tells Nmap how many bits of the 32-bit IPv4 address are reserved for the **network** portion vs the **host** portion.
+
+**Formula:**
+```
+Total IPs = 2^(32 - CIDR number)
+```
+
+| CIDR | Host Bits | Total IPs |
+|------|-----------|-----------|
+| /30  | 2         | 4         |
+| /29  | 3         | 8         |
+| /28  | 4         | 16        |
+| /27  | 5         | 32        |
+| /24  | 8         | 256       |
+| /16  | 16        | 65,536    |
+
+### 🏷️ Network Address vs Broadcast Address
+
+Every subnet reserves its **first** and **last** address:
+
+Example: `192.168.1.0/30` → 4 total addresses: `.0, .1, .2, .3`
+
+| Address | Role |
+|---------|------|
+| `192.168.1.0` (first) | **Network Address** — identifies the subnet itself, not assigned to any device |
+| `192.168.1.1` – `192.168.1.2` | **Usable Host Addresses** — can be assigned to actual devices |
+| `192.168.1.3` (last) | **Broadcast Address** — a packet sent here reaches *every* device on that subnet simultaneously |
+
+> 📝 Nmap still scans **all 4 addresses** in a `/30` (including network & broadcast), even though only 2 are technically "usable" hosts.
+
+---
+
+## 🖧 Host Discovery Techniques (Protocol by Protocol)
+
+| Scan Type | Example Command | How It Works |
+|-----------|------------------|--------------|
+| **ARP Scan** | `sudo nmap -PR -sn 10.200.6.0/24` | Sends a Layer 2 broadcast ARP request ("Who has this IP?"). Only works on the **local network/broadcast domain**. Fast & reliable — the default & best method for LAN discovery. |
+| **ICMP Echo Scan** | `sudo nmap -PE -sn 10.200.6.0/24` | This is literally what a normal `ping` does — sends an **ICMP Echo Request**, expects an **ICMP Echo Reply**. Any reply = host is alive. |
+| **ICMP Timestamp Scan** | `sudo nmap -PP -sn 10.200.6.0/24` | Used as a fallback when Echo (ping) is blocked by a firewall. Asks the target "what's your current system time?" — any reply confirms the host is alive (the actual time value doesn't matter to Nmap). |
+| **ICMP Address Mask Scan** | `sudo nmap -PM -sn 10.200.6.0/24` | Another Echo fallback — asks the target for its **subnet mask**. A reply (regardless of the mask value) confirms the host is up. Mostly legacy — modern OSes rarely respond to this. |
+| **TCP SYN Ping Scan** | `sudo nmap -PS22,80,443 -sn 10.200.6.0/30` | Sends a SYN packet to specific ports just for **discovery**, not port-state analysis. Whether the reply is SYN/ACK (open) or RST (closed), *either* response confirms the host is alive. Useful when ICMP is blocked but common ports (80, 443, 22) are not. |
+| **TCP ACK Ping Scan** | `sudo nmap -PA22,80,443 -sn 10.200.6.0/30` | Sends an ACK packet as if a connection already exists. The target, confused, replies with RST — confirming it's alive. Used to bypass **stateless firewalls** that block SYN but allow ACK packets (assuming they belong to an "established" connection). |
+| **UDP Ping Scan** | `sudo nmap -PU53,161,162 -sn 10.200.6.0/30` | Sends a UDP datagram to specific ports (DNS-53, SNMP-161/162). A closed port typically triggers an **ICMP "Port Unreachable"** error — confirming the host is alive. |
+
+> ⚠️ **Key takeaway:** Any response from a host — regardless of protocol — indicates that it is online. That's the entire principle behind host discovery.
+
+---
+
+## 🚩 TCP Flags Reference
+
+Understanding TCP flags is essential to understanding *why* each scan type behaves the way it does:
+
+| Flag | Function | Analogy |
+|------|----------|---------|
+| **SYN** | Initiates a new connection | The first "hello" of a handshake |
+| **ACK** | Confirms data/packet receipt | WhatsApp's "seen" tick |
+| **PSH** | Push data to the application immediately, don't buffer | "Send it now, don't wait" |
+| **RST** | Abruptly tear down the connection | Knocking on a closed door — no answer |
+| **FIN** | Gracefully/politely close the connection | "Alright, hanging up now" |
+| **URG** | Marks data as urgent, process immediately | An "URGENT" stamped letter |
+
+### The TCP 3-Way Handshake (Connection Establishment)
+```
+Client → Server :  SYN
+Server → Client :  SYN + ACK
+Client → Server :  ACK
+```
+
+### The TCP 4-Way Close (Graceful Termination)
+```
+Client → Server :  FIN
+Server → Client :  ACK
+Server → Client :  FIN
+Client → Server :  ACK
+```
+
+---
+
+## 🔗 ARP vs TCP — Different Layers, Different Jobs
+
+A common point of confusion: **does ARP let you communicate with a host, like a TCP handshake does?**
+
+- **ARP (Layer 2 — Data Link):** Purely a mapping tool. It only answers "who owns this IP → what's your MAC address?" It does **not** establish a session or transfer any application data.
+- **TCP Handshake (Layer 4 — Transport):** This is what actually establishes a real, usable connection for data exchange.
+
+**Relationship:** Whenever a device sends a TCP packet to another host on the same local network, the OS first performs ARP in the background (if the MAC isn't already cached) to resolve the destination MAC address — *then* wraps the TCP packet in an Ethernet frame addressed to that MAC.
+
+> 🏠 **Analogy:** ARP is like finding out someone's house/flat number in a housing society. The TCP handshake is like actually knocking on their door and having a conversation. You need the address first, but knowing the address isn't the same as communicating.
+
+---
+
+## ✅ Quick Command Cheat-Sheet
+
+```bash
+# Local network discovery
+sudo nmap -PR -sn 10.200.6.0/24        # ARP scan
+
+# ICMP-based discovery
+sudo nmap -PE -sn 10.200.6.0/24        # Echo scan (ping)
+sudo nmap -PP -sn 10.200.6.0/24        # Timestamp scan
+sudo nmap -PM -sn 10.200.6.0/24        # Address Mask scan
+
+# TCP-based discovery
+sudo nmap -PS22,80,443 -sn 10.200.6.0/30   # SYN Ping scan
+sudo nmap -PA22,80,443 -sn 10.200.6.0/30   # ACK Ping scan
+
+# UDP-based discovery
+sudo nmap -PU53,161,162 -sn 10.200.6.0/30  # UDP Ping scan
+
+# Reading targets from a file
+nmap -iL targets.txt
+
+# Listing targets without scanning (dry run)
+nmap -sL targetipaddress
+```
+
+---
+
+📎 *Part of my TryHackMe "Nmap" room writeup series — see the companion file `02-Nmap-Basic-Port-Scanning.md` for TCP/UDP port scanning, service/version detection, and OS fingerprinting.*
